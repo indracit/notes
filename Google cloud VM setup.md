@@ -27,22 +27,38 @@ echo "==============================================="
 
 # Step 1. Allocate a private IP range for services (if not already done)
 # We choose 172.16.0.0/16 – adjust if it conflicts with existing subnets.
+
 gcloud compute addresses create google-managed-services-default \
     --global \
     --purpose=VPC_PEERING \
     --prefix-length=16 \
-    --network=${VPC_NETWORK} \
-    --description="Peering range for Cloud SQL" \
-    --quiet 2>/dev/null || echo "Address range may already exist, continuing..."
+    --network=default \
+    --description="Peering range for Cloud SQL"
+
+
+# gcloud compute addresses create - gcloud command to create a new address object
+# google-managed-services-default – The name you give to this address resource.
+# --global - Specifies that the address range is **global**, not tied to a single region.
+# --purpose=VPC_PEERING - Tells Google Cloud that this address block is reserved **for VPC Peering**, specifically to be used by another network (Google’s services VPC) that will be peered with your VPC.
+
+# --prefix-length=16 - The size of the IP block in CIDR notation. `16` means a `/16` subnet, which provides **65,536 private IP addresses** (e.g., 172.16.0.0/16).
+
+# --network=${VPC_NETWORK}  - - Specifies which **VPC network** this address range belongs to. In your script, `${VPC_NETWORK}` expands to `default` (your project’s default VPC). This tells Google: “Reserve a block of IPs for peering inside **this** VPC.” The range is then available for services like Cloud SQL to allocate private IPs when they’re attached to this specific network.
+
+# --quiet -  Suppresses any interactive prompts (like “Are you sure you want to create this?”). It allows the script to run non‑interactively without hanging.
+
+# 2>/dev/null || echo "Address range may already exist, continuing..." Redirects standard error (file descriptor 2) to `/dev/null`, so any error messages from the command are hidden.
+
+
+
 
 # Step 2. Create the private services connection (peering)
 gcloud services vpc-peerings connect \
     --service=servicenetworking.googleapis.com \
     --ranges=google-managed-services-default \
     --network=${VPC_NETWORK} \
-    --quiet 2>/dev/null || echo "Peering may already exist, continuing..."
+   
 
-echo ""
 echo "2. Creating Cloud SQL instance (private IP only)..."
 
 # Step 3. Create the Cloud SQL instance with no public IP
@@ -52,12 +68,11 @@ gcloud sql instances create ${SQL_INSTANCE} \
     --region=${REGION} \
     --storage-size=10 \
     --storage-type=SSD \
-    --backup-start-time=03:00 \
     --no-backup \
     --availability-type=zonal \
     --network=${VPC_NETWORK} \
-    --no-assign-ip \
-    --quiet
+    --no-assign-ip
+  
 
 echo ""
 echo "3. Creating database and user..."
@@ -83,7 +98,7 @@ gcloud compute instances create ${INSTANCE_NAME} \
     --network=${VPC_NETWORK} \
     --scopes=cloud-platform \
     --tags=cicd-vm \
-    --quiet
+   
 
 # Step 6. Retrieve IPs
 SQL_PRIVATE_IP=$(gcloud sql instances describe ${SQL_INSTANCE} \
@@ -125,9 +140,58 @@ mysql -u cicduser -p -h <private_ip_of_cloud_sql>   # enter the password
 
 
 
+#open public port
+
+gcloud compute firewall-rules create allow-https-cicd-vm \
+    --direction=INGRESS \
+    --priority=1000 \
+    --network=default \
+    --action=ALLOW \
+    --rules=tcp:443 \
+    --source-ranges=0.0.0.0/0 \
+    --target-tags=cicd-vm-https
+# tag yur vm
+
+gcloud compute instances add-tags cicd-vm \
+    --zone=us-central1-a \
+    --tags=cicd-vm-https
+#delete the firewall rule
+
+gcloud compute firewall-rules delete allow-https-cicd-vm
+
+# list the rules
+gcloud compute firewall-rules list
+
+
+
+
+# docker installation
+
+sudo apt update && \
+sudo apt install -y ca-certificates curl && \
+sudo install -m 0755 -d /etc/apt/keyrings && \
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc && \
+sudo chmod a+r /etc/apt/keyrings/docker.asc && \
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null && \
+sudo apt update && \
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin && \
+sudo usermod -aG docker $USER && \
+newgrp docker
+
+
+
 #clean up
+# Delete firewall rules
+gcloud compute firewall-rules delete allow-https --quiet 2>/dev/null
+gcloud compute firewall-rules delete allow-https-cicd-vm --quiet 2>/dev/null
+
+# Delete VM
 gcloud compute instances delete cicd-vm --zone=us-central1-a --quiet
+
+# Delete Cloud SQL instance
 gcloud sql instances delete cicd-db --quiet
+
+# Delete the VPC peering range (if you want to fully clean up)
 gcloud compute addresses delete google-managed-services-default --global --quiet
 # (also remove the peering if you created it, but it can be left unused)
 
